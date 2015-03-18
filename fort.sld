@@ -65,4 +65,5 @@
       (define-syntax exception-protect
         (syntax-rules ()
           ((exception-protect expr final)
-           (with-exception-protect (lambda () expr)  (lambda () final)))))))))
+           (with-exception-protect (lambda () expr)  (lambda () final))))))))
+  (include "fort.scm"))
