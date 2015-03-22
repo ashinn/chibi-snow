@@ -68,6 +68,12 @@
   (filter (lambda (x) (and (pair? x) (eq? 'publisher (car x))))
           (cdr (current-repo cfg))))
 
+(define (get-user-password cfg email)
+  (let* ((user-dir (static-local-path cfg (email->path email)))
+         (key-file (make-path user-dir "pub-key"))
+         (key (call-with-input-file key-file read)))
+    (and (pair? key) (assoc-get key 'password))))
+
 (define (package-dir email pkg)
   (make-path
    (email->path email)

@@ -3,11 +3,11 @@
 (define-library (chibi snow fort)
   (export fail page respond static-url static-local-path
           escape-path email->path maybe-parse-hex
-          valid-email? valid-package? invalid-package-reason
+          valid-email? valid-package?
           extract-snowball-package package-dir
           rewrite-repo update-repo
           update-repo-package update-repo-object
-          repo-publishers current-repo)
+          repo-publishers current-repo get-user-password)
   (import (scheme base)
           (scheme read)
           (scheme write)

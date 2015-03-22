@@ -16,6 +16,7 @@
           get-program-file program-name program-install-name
           invalid-package-reason valid-package?
           invalid-library-reason valid-library?
+          invalid-signature-reason
           repo-find-publisher lookup-digest rsa-identity=?
           extract-rsa-private-key extract-rsa-public-key)
   (import (chibi)
