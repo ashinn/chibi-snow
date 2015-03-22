@@ -68,6 +68,31 @@
   (filter (lambda (x) (and (pair? x) (eq? 'publisher (car x))))
           (cdr (current-repo cfg))))
 
+(define (invalid-signature-reason cfg sig-spec snowball)
+  (let* ((digest-name (assoc-get (cdr sig-spec) 'digest #f 'sha-256))
+         (digest (assoc-get (cdr sig-spec) digest-name))
+         (actual-digest ((lookup-digest digest-name) snowball))
+         (sig (assoc-get (cdr sig-spec) 'rsa))
+         (email (assoc-get (cdr sig-spec) 'email))
+         (rsa-key-sexp (find (rsa-identity=? email)
+                             (repo-publishers cfg)))
+         (rsa-key (and (pair? rsa-key-sexp)
+                       (extract-rsa-public-key (cdr rsa-key-sexp)))))
+    (cond
+     ((not (equal? digest actual-digest))
+      (string-append "the " digest-name " digest in the signature <" digest
+                     "> didn't match the actual value: <" actual-digest ">"))
+     ((not rsa-key)
+      (string-append "unknown publisher: " email))
+     ((not (rsa-verify? rsa-key
+                        (maybe-parse-hex digest)
+                        (maybe-parse-hex sig)))
+      (log-error "digest: " digest " sig: " (maybe-parse-hex sig)
+                 " verify: " (rsa-encrypt rsa-key digest))
+      "rsa signature did not match")
+     (else
+      #f))))
+
 (define (get-user-password cfg email)
   (let* ((user-dir (static-local-path cfg (email->path email)))
          (key-file (make-path user-dir "pub-key"))

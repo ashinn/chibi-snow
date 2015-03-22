@@ -68,6 +68,31 @@
           (history-insert! input-history str)
           (check str (proc str) lp)))))))
 
+(define (input-hidden prompt)
+  (show #t prompt)
+  (flush-output-port)
+  (let ((res (with-stty '(not echo) (lambda () (read-line)))))
+    (show #t "\n")
+    res))
+
+(define (input-password cfg name prompt1 . o)
+  (let ((prompt2 (or (and (pair? o) (car o))
+                     (string-append prompt1 " (confirmation): "))))
+    (let lp ()
+      (let ((password (input-hidden prompt1)))
+        (cond
+         ((equal? password "")
+          (show #t "password must be non-empty\n")
+          (lp))
+         (else
+          (let ((conf (input-hidden prompt2)))
+            (cond
+             ((not (equal? password conf))
+              (show #t "password didn't match\n")
+              (lp))
+             (else
+              password)))))))))
+
 (define (input-number cfg name prompt . o)
   (let* ((default (and (pair? o) (car o)))
          (lo (and (pair? o) (pair? (cdr o)) (cadr o)))

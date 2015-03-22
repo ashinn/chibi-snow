@@ -474,12 +474,9 @@
         "uniquely identify the key.\n")
   (let* ((name (input cfg '(gen-key name) "Name: "))
          (email (input cfg '(gen-key email) "Email: "))
-         (passwd (input cfg '(gen-key password) "Password for upload: "))
-         (_ (if (not (equal? "" passwd))
-                (let ((pw2 (input cfg '(gen-key password)
-                                  "Password (confirmation): ")))
-                  (if (not (equal? passwd pw2))
-                      (die 2 "confirmed password didn't match original")))))
+         (passwd (input-password cfg '(gen-key password)
+                                 "Password for upload: "
+                                 "Password (confirmation): "))
          (bits (input-number cfg '(gen-key bits)
                              "RSA key size in bits: " 512 64 20148))
          (key (conf-gen-key cfg bits))
@@ -564,22 +561,26 @@
          (email (or (conf-get cfg 'email)
                     (assoc-get (car keys) 'email)))
          (rsa-key-sexp (find (rsa-identity=? email) keys))
-         (rsa-key (extract-rsa-private-key rsa-key-sexp))
-         (sig (fast-eval `(rsa-sign (make-rsa-key ,(rsa-key-bits rsa-key)
-                                                  ,(rsa-key-n rsa-key)
-                                                  #f
-                                                  ,(rsa-key-d rsa-key))
-                                    ;;,(hex-string->integer digest)
-                                    ,(hex-string->bytevector digest))
-                         '((chibi crypto rsa))))
-         (hex-sig (if (bytevector? sig)
-                      (bytevector->hex-string sig)
-                      (integer->hex-string sig))))
-    `(signature
-      (email ,email)
-      (digest ,digest-name)
-      (,digest-name ,digest)
-      (rsa ,hex-sig))))
+         (rsa-key (extract-rsa-private-key rsa-key-sexp)))
+    (append
+     `(signature
+       (email ,email))
+     (if (conf-get cfg 'sign-uploads?)
+         (let* ((sig (fast-eval
+                      `(rsa-sign (make-rsa-key ,(rsa-key-bits rsa-key)
+                                               ,(rsa-key-n rsa-key)
+                                               #f
+                                               ,(rsa-key-d rsa-key))
+                                 ;;,(hex-string->integer digest)
+                                 ,(hex-string->bytevector digest))
+                      '((chibi crypto rsa))))
+                (hex-sig (if (bytevector? sig)
+                             (bytevector->hex-string sig)
+                             (integer->hex-string sig))))
+           `((digest ,digest-name)
+             (,digest-name ,digest)
+             (rsa ,hex-sig)))
+         '()))))
 
 (define (command/sign cfg spec package)
   (let* ((dst (or (conf-get cfg 'output)
@@ -639,12 +640,7 @@
           ((conf-get cfg 'sig-file)
            => (lambda (sig-file) `(sig (file . ,sig-file))))
           (else
-           (let ((sig
-                  (if (conf-get cfg 'sign-uploads?)
-                      (generate-signature cfg package)
-                      `(signature
-                        (email ,(or (conf-get cfg 'email)
-                                    (assoc-get (car keys) 'email)))))))
+           (let ((sig (generate-signature cfg package)))
              `(sig (file . "package.sig")
                    (value . ,(write-to-string sig))))))))
     (remote-command cfg '(command package uri) "/pkg/put"
@@ -1138,7 +1134,7 @@
            res)))))
 
 ;; install from a raw, unzipped snowball as an in-memory bytevector
-(define (install-package-from-snowball impl cfg snowball)
+(define (install-package-from-snowball repo impl cfg pkg snowball)
   (cond
    ((not (tar-safe? snowball))
     (die 2 "package tarball should contain a single relative directory: "
@@ -1172,9 +1168,10 @@
                       pkg)
             (installed-files ,@installed-files)))))))))
 
-(define (install-package-from-file impl cfg file)
-  (install-package-from-snowball
-   impl cfg (maybe-unzip (file->bytevector file))))
+(define (install-package-from-file repo impl cfg file)
+  (let ((pkg (package-file-meta file))
+        (snowball (maybe-gunzip (file->bytevector file))))
+    (install-package-from-snowball repo impl cfg pkg snowball)))
 
 (define (install-package repo impl cfg pkg)
   (cond
@@ -1184,7 +1181,7 @@
     (let* ((url (package-url repo pkg))
            (raw (fetch-package cfg url))
            (snowball (maybe-gunzip raw)))
-      (install-package-from-snowball impl cfg snowball)))))
+      (install-package-from-snowball impl cfg pkg snowball)))))
 
 (define (install-for-implementation repo impl cfg pkgs)
   (for-each
@@ -1257,30 +1254,31 @@
 ;; download in a single batch.  Then perform the installations a
 ;; single implementation at a time.
 (define (command/install cfg spec . args)
-  (let* ((repo (maybe-update-repository cfg))
-         (impls (conf-selected-implementations cfg))
-         (impl-cfgs (map (lambda (impl)
-                           (conf-for-implementation cfg impl))
-                         impls)))
-    (receive (package-files lib-names) (partition package-file? args)
-      (let* ((lib-names (map parse-library-name lib-names))
-             (impl-pkgs
-              (map (lambda (impl cfg)
-                     (expand-package-dependencies repo impl cfg lib-names))
-                   impls
-                   impl-cfgs)))
-        (for-each
-         (lambda (impl cfg pkgs)
-           ;; install by name and dependency
-           (install-for-implementation repo impl cfg pkgs)
-           ;; install by file
-           (for-each
-            (lambda (pkg-file)
-              (install-package-from-file impl cfg pkg-file))
-            package-files))
-         impls
-         impl-cfgs
-         impl-pkgs)))))
+  (let*-values
+      ((repo (maybe-update-repository cfg))
+       (impls (conf-selected-implementations cfg))
+       (impl-cfgs (map (lambda (impl)
+                         (conf-for-implementation cfg impl))
+                       impls))
+       ((package-files lib-names) (partition package-file? args))
+       (lib-names (map parse-library-name lib-names))
+       (impl-pkgs
+        (map (lambda (impl cfg)
+               (expand-package-dependencies repo impl cfg lib-names))
+             impls
+             impl-cfgs)))
+    (for-each
+     (lambda (impl cfg pkgs)
+       ;; install by name and dependency
+       (install-for-implementation repo impl cfg pkgs)
+       ;; install by file
+       (for-each
+        (lambda (pkg-file)
+          (install-package-from-file repo impl cfg pkg-file))
+        package-files))
+     impls
+     impl-cfgs
+     impl-pkgs)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Upgrade - upgrade installed packages.

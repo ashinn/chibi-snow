@@ -5,6 +5,7 @@
           escape-path email->path maybe-parse-hex
           valid-email? valid-package?
           extract-snowball-package package-dir
+          invalid-signature-reason
           rewrite-repo update-repo
           update-repo-package update-repo-object
           repo-publishers current-repo get-user-password)
@@ -18,6 +19,7 @@
           (chibi snow package)
           (chibi bytevector)
           (chibi config)
+          (chibi crypto rsa)
           (chibi filesystem)
           (chibi io)
           (chibi log)
