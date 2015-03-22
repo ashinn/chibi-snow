@@ -185,12 +185,12 @@
                               => (lambda (x) (list (list 'author x))))
                              (else '()))
                           (path ,lib-file)
-                          (name ,name)))
+                          (name ,name)
+                          library))
                   (files `((rename ,file ,lib-file))))
            (cond
             ((null? ls)
-             (cons `(library ,@(reverse info))
-                   files))
+             (cons (reverse info) files))
             (else
              (match (car ls)
                (((or 'include 'include-ci) includes ...)
@@ -206,7 +206,15 @@
                     (cons (cons 'depends (map import-name libs)) info)
                     files))
                (('cond-expand clauses ...)
-                (lp (append (append-map cdr clauses) (cdr ls)) info files))
+                ;;(lp (append (append-map cdr clauses) (cdr ls)) info files)
+                (let ((libs+files (map (lambda (c) (lp c '() '())) clauses)))
+                  (lp (cdr ls)
+                      (cons (cons 'cond-expand
+                                  (map cons
+                                       (map car clauses)
+                                       (map car libs+files)))
+                            info)
+                      (append files (append-map cdr libs+files)))))
                (else
                 (lp (cdr ls) info files))))))))
       (else
@@ -304,27 +312,26 @@
      libs))
    (else '())))
 
-(define (package-description cfg spec libs docs)
-  (cond
-   ((conf-get cfg '(command package description)))
-   ((conf-get cfg '(command upload description)))
-   ;; Crazy hack, make this more robust, probably opt-in.
-   ((and (pair? docs) (pair? (car docs)) (eq? 'inline (caar docs))
-         (regexp-search
-          '(: "<p>" (* "\n") (* space) ($ (* (~ ("."))) "."))
-          (third (car docs))))
-    => (lambda (m)
-         (let ((s (regexp-match-submatch m 1)))
-           (and s
-                (regexp-replace-all
-                 '(>= 2 space)
-                 (regexp-replace-all
-                  "\n"
-                  (regexp-replace-all '(: "<" (? "/") (* (~ ("<>"))) ">")
-                                      s "")
-                  " ")
-                 " ")))))
-   (else #f)))
+(define package-description
+  (let ((sent-re (regexp '(: "<p>" (* "\n") (* space) ($ (* (~ ("."))) "."))))
+        (space-re (regexp '(or (: (* space) "\n" (* space)) (>= 2 space))))
+        (tag-re (regexp '(: "<" (? "/") (* (~ ("<>"))) ">"))))
+    (lambda (cfg spec libs docs)
+      (cond
+       ((conf-get cfg '(command package description)))
+       ((conf-get cfg '(command upload description)))
+       ;; Crazy hack, make this more robust, probably opt-in.
+       ((and (pair? docs) (pair? (car docs)) (eq? 'inline (caar docs))
+             (regexp-search sent-re (third (car docs))))
+        => (lambda (m)
+             (let ((s (regexp-match-submatch m 1)))
+               (and s
+                    (string-trim
+                     (regexp-replace-all
+                      space-re
+                      (regexp-replace-all tag-re s "")
+                      " "))))))
+       (else #f)))))
 
 (define (package-test cfg)
   (conf-get cfg '(command package test)))
@@ -1029,7 +1036,7 @@
          (ext (conf-get cfg 'library-extension "sld"))
          (dest-library-file (path-replace-extension library-file ext))
          (include-files
-          (library-include-files cfg (make-path dir library-file)))
+          (library-include-files impl cfg (make-path dir library-file)))
          (rewrite-include-files
           ;; Rewrite if any include has the same path as the library
           ;; declaration file after extension renaming.
@@ -1246,7 +1253,7 @@
                 (exit 2)))
            (else
             (let ((pkg (select-best-candidate impl cfg repo candidates)))
-              (lp (append (package-dependencies pkg) (cdr ls))
+              (lp (append (package-dependencies impl cfg pkg) (cdr ls))
                   (cons pkg res)
                   ignored))))))))))
 
@@ -1255,14 +1262,14 @@
 ;; single implementation at a time.
 (define (command/install cfg spec . args)
   (let*-values
-      ((repo (maybe-update-repository cfg))
-       (impls (conf-selected-implementations cfg))
-       (impl-cfgs (map (lambda (impl)
-                         (conf-for-implementation cfg impl))
-                       impls))
+      (((repo) (maybe-update-repository cfg))
+       ((impls) (conf-selected-implementations cfg))
+       ((impl-cfgs) (map (lambda (impl)
+                           (conf-for-implementation cfg impl))
+                         impls))
        ((package-files lib-names) (partition package-file? args))
-       (lib-names (map parse-library-name lib-names))
-       (impl-pkgs
+       ((lib-names) (map parse-library-name lib-names))
+       ((impl-pkgs)
         (map (lambda (impl cfg)
                (expand-package-dependencies repo impl cfg lib-names))
              impls

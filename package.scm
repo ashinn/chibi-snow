@@ -196,8 +196,8 @@
            (find (lambda (x) (equal? name (library-name x)))
                  (package-libraries package)))))
 
-(define (package-dependencies package)
-  (append-map library-dependencies
+(define (package-dependencies impl cfg package)
+  (append-map (lambda (lib) (library-dependencies cfg impl lib))
               (package-libraries package)))
 
 (define (package-installed-files pkg)
@@ -249,9 +249,25 @@
 (define (library-url lib)
   (and (pair? lib) (assoc-get (cdr lib) 'url eq?)))
 
-(define (library-dependencies lib)
-  (cond ((assq 'depends (cdr lib)) => cdr)
-        (else '())))
+(define (library-for-impl impl cfg lib)
+  (append
+   lib
+   (append-map
+    (lambda (x)
+      (or (and (pair? x) (eq? 'cond-expand (car x))
+               (cond
+                ((find
+                  (lambda (clause) (check-cond-expand impl cfg (car clause)))
+                  (cdr x))
+                 => cdr)
+                (else #f)))
+          '()))
+    (cdr lib))))
+
+(define (library-dependencies impl cfg lib)
+  (append-map
+   (lambda (x) (or (and (pair? x) (eq? 'depends (car x)) (cdr x)) '()))
+   (cdr (library-for-impl impl cfg lib))))
 
 (define (parse-library-name str)
   (cond
@@ -261,18 +277,20 @@
    (else (map (lambda (x) (or (string->number x) (string->symbol x)))
               (string-split str #\.)))))
 
-(define (check-cond-expand config test)
+(define (check-cond-expand impl config test)
   (define (library-installed? config name)
-    ;; assume it could be installed for now
+    ;; assume it could be installed for now... this is effectively a
+    ;; "suggested" package rather than a required one
     #t)
   (cond
    ((symbol? test)
-    (or (eq? 'else test) (memq test (conf-get-list config 'features))))
+    (or (eq? 'else test) (eq? impl test)
+        (memq test (conf-get-list config 'features))))
    ((pair? test)
     (case (car test)
-      ((not) (not (check-cond-expand config (cadr test))))
-      ((and) (every (lambda (x) (check-cond-expand config x)) (cdr test)))
-      ((or) (any (lambda (x) (check-cond-expand config x)) (cdr test)))
+      ((not) (not (check-cond-expand impl config (cadr test))))
+      ((and) (every (lambda (x) (check-cond-expand impl config x)) (cdr test)))
+      ((or) (any (lambda (x) (check-cond-expand impl config x)) (cdr test)))
       ((library) (every (lambda (x) (library-installed? config x)) (cdr test)))
       (else
        (warn "unknown cond-expand form" test)
@@ -281,7 +299,7 @@
 
 ;; We can't use the native library system introspection since we may
 ;; be analyzing a library which can't be loaded in the native system.
-(define (library-analyze config file)
+(define (library-analyze impl config file)
   (let ((sexp (call-with-input-file file read)))
     (and (list? sexp)
          (memq (car sexp) '(define-library library define-module module))
@@ -293,14 +311,15 @@
               (case (caar ls)
                 ((cond-expand)
                  (cond
-                  ((find (lambda (x) (check-cond-expand config (car x))) (cdar ls))
+                  ((find (lambda (x) (check-cond-expand impl config (car x)))
+                         (cdar ls))
                    => (lambda (x) (analyze (cdr x))))
                   (else (analyze (cdr ls)))))
                 (else (list (car ls))))
               (analyze (cdr ls)))))))))
 
-(define (library-include-files config file)
-  (let ((lib (library-analyze config file))
+(define (library-include-files impl config file)
+  (let ((lib (library-analyze impl config file))
         (dir (path-directory file)))
     (append-map
      (lambda (x) (map (lambda (y) (make-path dir y)) (cdr x)))
