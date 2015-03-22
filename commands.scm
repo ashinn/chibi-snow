@@ -1137,6 +1137,45 @@
                             "\nProceed anyway?"))
            res)))))
 
+;; install from a raw, unzipped snowball as an in-memory bytevector
+(define (install-package-from-snowball impl cfg snowball)
+  (cond
+   ((not (tar-safe? snowball))
+    (die 2 "package tarball should contain a single relative directory: "
+         (tar-files snowball)))
+   ((package-maybe-digest-mismatches impl cfg pkg snowball)
+    => (lambda (x) (die 2 "package checksum didn't match: " x)))
+   ((package-maybe-signature-mismatches repo impl cfg pkg snowball)
+    => (lambda (x) (die 2 "package signature didn't match: " x)))
+   (else
+    (call-with-temp-dir
+     "pkg"
+     (lambda (dir)
+       (tar-extract snowball (lambda (f) (make-path dir (path-strip-top f))))
+       (let ((installed-files
+              (append
+               (append-map
+                (lambda (lib)
+                  (build-library impl cfg lib dir)
+                  (test-library impl cfg lib dir)
+                  (install-library impl cfg lib dir))
+                (package-libraries pkg))
+               (append-map
+                (lambda (prog)
+                  (build-program impl cfg prog dir)
+                  (install-program impl cfg prog dir))
+                (package-programs pkg)))))
+         (install-package-meta-info
+          impl cfg
+          `(,@(remove (lambda (x)
+                        (and (pair? x) (eq? 'installed-files (car x))))
+                      pkg)
+            (installed-files ,@installed-files)))))))))
+
+(define (install-package-from-file impl cfg file)
+  (install-package-from-snowball
+   impl cfg (maybe-unzip (file->bytevector file))))
+
 (define (install-package repo impl cfg pkg)
   (cond
    ((maybe-invalid-package-reason impl cfg pkg)
@@ -1145,38 +1184,7 @@
     (let* ((url (package-url repo pkg))
            (raw (fetch-package cfg url))
            (snowball (maybe-gunzip raw)))
-      (cond
-       ((not (tar-safe? snowball))
-        (die 2 "package tarball should contain a single relative directory: "
-             (tar-files snowball)))
-       ((package-maybe-digest-mismatches impl cfg pkg snowball)
-        => (lambda (x) (die 2 "package checksum didn't match: " x)))
-       ((package-maybe-signature-mismatches repo impl cfg pkg snowball)
-        => (lambda (x) (die 2 "package signature didn't match: " x)))
-       (else
-        (call-with-temp-dir
-         "pkg"
-         (lambda (dir)
-           (tar-extract snowball (lambda (f) (make-path dir (path-strip-top f))))
-           (let ((installed-files
-                  (append
-                   (append-map
-                    (lambda (lib)
-                      (build-library impl cfg lib dir)
-                      (test-library impl cfg lib dir)
-                      (install-library impl cfg lib dir))
-                    (package-libraries pkg))
-                   (append-map
-                    (lambda (prog)
-                      (build-program impl cfg prog dir)
-                      (install-program impl cfg prog dir))
-                    (package-programs pkg)))))
-             (install-package-meta-info
-              impl cfg
-              `(,@(remove (lambda (x)
-                            (and (pair? x) (eq? 'installed-files (car x))))
-                          pkg)
-                (installed-files ,@installed-files))))))))))))
+      (install-package-from-snowball impl cfg snowball)))))
 
 (define (install-for-implementation repo impl cfg pkgs)
   (for-each
@@ -1253,19 +1261,26 @@
          (impls (conf-selected-implementations cfg))
          (impl-cfgs (map (lambda (impl)
                            (conf-for-implementation cfg impl))
-                         impls))
-         (lib-names (map parse-library-name args))
-         (impl-pkgs
-          (map (lambda (impl cfg)
-                 (expand-package-dependencies repo impl cfg lib-names))
-               impls
-               impl-cfgs)))
-    (for-each
-     (lambda (impl cfg pkgs)
-       (install-for-implementation repo impl cfg pkgs))
-     impls
-     impl-cfgs
-     impl-pkgs)))
+                         impls)))
+    (receive (package-files lib-names) (partition package-file? args)
+      (let* ((lib-names (map parse-library-name lib-names))
+             (impl-pkgs
+              (map (lambda (impl cfg)
+                     (expand-package-dependencies repo impl cfg lib-names))
+                   impls
+                   impl-cfgs)))
+        (for-each
+         (lambda (impl cfg pkgs)
+           ;; install by name and dependency
+           (install-for-implementation repo impl cfg pkgs)
+           ;; install by file
+           (for-each
+            (lambda (pkg-file)
+              (install-package-from-file impl cfg pkg-file))
+            package-files))
+         impls
+         impl-cfgs
+         impl-pkgs)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Upgrade - upgrade installed packages.
