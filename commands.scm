@@ -434,24 +434,26 @@
   (or (conf-get cfg 'snow-dir)
       (string-append (get-environment-variable "HOME") "/.snow")))
 
-(define (rsa-key->sexp key name email)
-  `((name ,name)
-    (email ,email)
-    (bits ,(rsa-key-bits key))
-    ,@(cond
-       ((rsa-key-e key)
-        => (lambda (e)
-             `((public-key
-                (modulus ,(integer->hex-string (rsa-key-n key)))
-                (exponent ,e)))))
-       (else '()))
-    ,@(cond
-       ((rsa-key-d key)
-        => (lambda (d)
-             `((private-key
-                (modulus ,(integer->hex-string (rsa-key-n key)))
-                (exponent ,d)))))
-       (else '()))))
+(define (rsa-key->sexp key name email . o)
+  (let ((password (and (pair? o) (not (equal? "" (car o))) (car o))))
+    `((name ,name)
+      (email ,email)
+      (bits ,(rsa-key-bits key))
+      ,@(cond (password `((password ,password))) (else '()))
+      ,@(cond
+         ((rsa-key-e key)
+          => (lambda (e)
+               `((public-key
+                  (modulus ,(integer->hex-string (rsa-key-n key)))
+                  (exponent ,e)))))
+         (else '()))
+      ,@(cond
+         ((rsa-key-d key)
+          => (lambda (d)
+               `((private-key
+                  (modulus ,(integer->hex-string (rsa-key-n key)))
+                  (exponent ,d)))))
+         (else '())))))
 
 (define (conf-gen-key cfg bits)
   (show #t "Generating a new key, this may take quite a while...\n")
@@ -472,6 +474,12 @@
         "uniquely identify the key.\n")
   (let* ((name (input cfg '(gen-key name) "Name: "))
          (email (input cfg '(gen-key email) "Email: "))
+         (passwd (input cfg '(gen-key password) "Password for upload: "))
+         (_ (if (not (equal? "" passwd))
+                (let ((pw2 (input cfg '(gen-key password)
+                                  "Password (confirmation): ")))
+                  (if (not (equal? passwd pw2))
+                      (die 2 "confirmed password didn't match original")))))
          (bits (input-number cfg '(gen-key bits)
                              "RSA key size in bits: " 512 64 20148))
          (key (conf-gen-key cfg bits))
@@ -481,7 +489,7 @@
          (old-keys (guard (exn (else '()))
                      (call-with-input-file key-file read)))
          (new-keys
-          (cons (rsa-key->sexp key name email) 
+          (cons (rsa-key->sexp key name email passwd)
                 ;; TODO: confirm overwrite, preserve old keys
                 (remove (rsa-identity=? email) old-keys))))
     (if (not (file-directory? snow-dir))
@@ -522,9 +530,16 @@
          (rsa-key-sexp (or (find (rsa-identity=? email) keys)
                            (and (not email) (car keys))))
          (name (assoc-get rsa-key-sexp 'name))
+         ;; Register the sha-256 sum of email and password - we'll
+         ;; never send the password itself over the network.
+         ;; TODO: encrypt this
+         (password
+          (cond ((assoc-get rsa-key-sexp 'password)
+                 => (lambda (pw) (sha-256 (string-append email pw))))
+                (else #f)))
          (rsa-pub-key (extract-rsa-public-key rsa-key-sexp))
          (rsa-pub-key-str
-          (write-to-string (rsa-key->sexp rsa-pub-key name email))))
+          (write-to-string (rsa-key->sexp rsa-pub-key name email password))))
     (remote-command cfg
                     '(command reg-key uri)
                     "/pkg/reg"
@@ -599,8 +614,23 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Upload - upload a package.
 
+(define (get-password cfg package)
+  (and (not (conf-get cfg 'upload-without-password?))
+       (let* ((keys (call-with-input-file
+                        (or (conf-get cfg 'key-file)
+                            (string-append (conf-get-snow-dir cfg)
+                                           "/priv-key.scm"))
+                      read))
+              (email (or (conf-get cfg 'email)
+                         (assoc-get (car keys) 'email)))
+              (rsa-key-sexp (find (rsa-identity=? email) keys))
+              (raw-password (assoc-get rsa-key-sexp 'password)))
+         (and raw-password
+              (sha-256 (string-append email raw-password))))))
+
 (define (upload-package cfg spec package . o)
-  (let ((pkg (if (string? package)
+  (let ((password `(pw (value ,(get-password cfg))))
+        (pkg (if (string? package)
                  `(u (file . ,package))
                  `(u (file . ,(if (pair? o) (car o) "package.tgz"))
                      (value . ,package))))
@@ -609,10 +639,16 @@
           ((conf-get cfg 'sig-file)
            => (lambda (sig-file) `(sig (file . ,sig-file))))
           (else
-           `(sig (file . "package.sig")
-                 (value . ,(write-to-string
-                            (generate-signature cfg package))))))))
-    (remote-command cfg '(command package uri) "/pkg/put" (list pkg sig))))
+           (let ((sig
+                  (if (conf-get cfg 'sign-uploads?)
+                      (generate-signature cfg package)
+                      `(signature
+                        (email ,(or (conf-get cfg 'email)
+                                    (assoc-get (car keys) 'email)))))))
+             `(sig (file . "package.sig")
+                   (value . ,(write-to-string sig))))))))
+    (remote-command cfg '(command package uri) "/pkg/put"
+                    (list password pkg sig))))
 
 (define (command/upload cfg spec . o)
   (define (non-homogeneous)
