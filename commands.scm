@@ -29,6 +29,7 @@
           (find "foment" 'foment)
           (find "gosh" 'gauche)
           (find "guile" 'guile)
+          (find "larceny" 'larceny)
           (find "sagittarius" 'sagittarius)))
 
 (define (conf-selected-implementations cfg)
@@ -894,20 +895,53 @@
            (cons share-dir (delete share-dir dirs))
            dirs)))
     ((gauche)
-     (let ((dir (process->string '(gauche-config "--sitelibdir"))))
-       (and (string? dir) (> 0 (string-length dir))
-            (eqv? #\/ (string-ref dir 0))
-            dir)))
+     (list
+      (let ((dir (process->string '(gauche-config "--sitelibdir"))))
+        (and (string? dir) (> 0 (string-length dir))
+             (eqv? #\/ (string-ref dir 0))
+             dir))))
     ((guile)
      (let ((path
             (guile-eval
              '(string-append (cdr (assq 'pkgdatadir %guile-build-info))
                              (string (integer->char 47))
                              (effective-version)))))
-       (if (string? path)
-           path
-           "/usr/local/share/guile/")))
-    (else (list (make-path "/usr/local/share/snow" impl)))))
+       (list
+        (if (string? path)
+            path
+            "/usr/local/share/guile/"))))
+    ((larceny)
+     (list
+      (make-path
+       (process->string
+        '(larceny -quiet -nobanner -- -e
+                  "(begin (display (getenv \"LARCENY_ROOT\")) (exit))"))
+       "lib/Snow")))
+    (else
+     (list (make-path "/usr/local/share/snow" impl)))))
+
+(define (scheme-program-command impl cfg file . o)
+  (let ((lib-path (and (pair? o) (car o))))
+    (case impl
+      ((chibi)
+       (let ((chibi (conf-get cfg 'chibi-path 'chibi-scheme)))
+         (if lib-path
+             `(,chibi -A ,lib-path ,file)
+             `(,chibi ,file))))
+      ((gauche)
+       (if lib-path
+           `(gosh -A ,lib-path ,file)
+           `(gosh ,file)))
+      ((guile)
+       (if lib-path
+           `(guile -L ,lib-path ,file)
+           `(guile ,file)))
+      ((larceny)
+       (if lib-path
+           `(larceny -r7rs -path ,lib-path -program ,file)
+           `(larceny -r7rs -program ,file)))
+      (else
+       #f))))
 
 (define (get-install-search-dirs impl cfg)
   (let ((install-dir (get-install-source-dir impl cfg))
@@ -927,8 +961,38 @@
           (and (pair? (cdr subname))
                (lp (drop-right subname 1)))))))
 
-(define (test-library impl cfg library dir)
-  #t)
+;; test the package locally built in dir
+(define (test-package impl cfg pkg dir)
+  (let* ((test-file (assoc-get pkg 'test))
+         (command (scheme-program-command impl cfg test-file dir)))
+    (cond
+     ((and test-file command (not (conf-get cfg 'skip-tests?)))
+      (or (match (process->output+error+status command)
+            ((output error status)
+             (cond
+              ((or (not (zero? status))
+                   (string-contains output "FAIL")
+                   (string-contains error "FAIL")
+                   (string-contains output "ERROR")
+                   (string-contains error "ERROR"))
+               (call-with-output-file (make-path dir "test-out.txt")
+                 (lambda (out) (display output out)))
+               (call-with-output-file (make-path dir "test-err.txt")
+                 (lambda (err) (display error err)))
+               #f)
+              (else
+               (info "All tests passed.")
+               (cond ((conf-get cfg 'show-tests?)
+                      (display "output:\n")
+                      (display output)
+                      (display error)))
+               #t)))
+            (else #f))
+          (yes-or-no? cfg "Tests failed: " test-file
+                      " (details in " dir "/test-{out,err}.txt)\n"
+                      "Proceed anyway?")))
+     (else
+      #t))))
 
 (define (lookup-installed-libraries impl cfg names)
   (map (lambda (name)
@@ -1155,25 +1219,27 @@
      "pkg"
      (lambda (dir)
        (tar-extract snowball (lambda (f) (make-path dir (path-strip-top f))))
-       (let ((installed-files
-              (append
-               (append-map
-                (lambda (lib)
-                  (build-library impl cfg lib dir)
-                  (test-library impl cfg lib dir)
-                  (install-library impl cfg lib dir))
-                (package-libraries pkg))
-               (append-map
-                (lambda (prog)
-                  (build-program impl cfg prog dir)
-                  (install-program impl cfg prog dir))
-                (package-programs pkg)))))
-         (install-package-meta-info
-          impl cfg
-          `(,@(remove (lambda (x)
-                        (and (pair? x) (eq? 'installed-files (car x))))
-                      pkg)
-            (installed-files ,@installed-files)))))))))
+       (for-each
+        (lambda (lib) (build-library impl cfg lib dir))
+        (package-libraries pkg))
+       (if (test-package impl cfg pkg dir)
+           (let ((installed-files
+                  (append
+                   (append-map
+                    (lambda (lib)
+                      (install-library impl cfg lib dir))
+                    (package-libraries pkg))
+                   (append-map
+                    (lambda (prog)
+                      (build-program impl cfg prog dir)
+                      (install-program impl cfg prog dir))
+                    (package-programs pkg)))))
+             (install-package-meta-info
+              impl cfg
+              `(,@(remove (lambda (x)
+                            (and (pair? x) (eq? 'installed-files (car x))))
+                          pkg)
+                (installed-files ,@installed-files))))))))))
 
 (define (install-package-from-file repo impl cfg file)
   (let ((pkg (package-file-meta file))

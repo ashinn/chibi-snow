@@ -68,6 +68,7 @@
     (library-extension string "the extension to use for library files")
     (installer symbol "name of installer to use")
     (implementations (list symbol) "impls to install for, or 'all'")
+    (chibi-path filename "path to chibi-scheme executable")
     ))
 
 (define (conf-default-path name)
@@ -77,7 +78,8 @@
 
 (define search-spec '())
 (define show-spec '())
-(define install-spec '())
+(define install-spec
+  '((show-tests? boolean ("show-tests") "show test output even on success")))
 (define upgrade-spec '())
 (define remove-spec '())
 (define status-spec '())
